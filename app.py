@@ -3,6 +3,7 @@ import streamlit as st
 from getdata import fetch_activist_data
 from generatestory import generate_storyboard
 from generateprompts import generate_image_prompts
+from generateimages import queue_comfyui_prompt
 
 st.set_page_config(page_title="독립운동가 웹툰 에이전트", page_icon="📜", layout="centered")
 
@@ -144,14 +145,60 @@ if 'current_story_data' in st.session_state and st.session_state['current_story_
                 storyboard=story_data['storyboard']
             )
             
-            if prompts:
-                st.success("프롬프트 생성이 완료되었습니다.")
-                st.session_state['current_prompts'] = prompts # 세션 저장
-                
-                # 결과 출력
-                for p in prompts:
-                    with st.container():
-                        st.markdown(f"**[Cut {p['cut']}]**")
-                        st.code(f"Positive: {p['positive_prompt']}\nNegative: {p['negative_prompt']}", language="text")
+# --- 이전 단계: 프롬프트가 정상 생성되어 세션에 저장된 이후 지점 ---
+                if prompts:
+                    st.success("프롬프트 생성이 완료되었습니다.")
+                    st.session_state['current_prompts'] = prompts
+                    
+                    for p in prompts:
+                        with st.container():
+                            st.markdown(f"**[Cut {p['cut']}]**")
+                            st.code(f"Positive: {p['positive_prompt']}\nNegative: {p['negative_prompt']}", language="text")
+                else:
+                    st.error("프롬프트 생성에 실패했습니다.")
+
+# --- 4단계: ComfyUI 이미지 생성 자동화 UI ---
+
+if 'current_prompts' in st.session_state and st.session_state['current_prompts']:
+    st.write("---")
+    st.subheader("4. ComfyUI 백그라운드 이미지 생성")
+    
+    # ComfyUI 서버 주소 입력창 (기본값 제공)
+    comfyui_server_url = st.text_input("ComfyUI 서버 주소:", value="http://127.0.0.1:8188")
+    workflow_json_name = st.text_input("ComfyUI API JSON 파일명:", value="workflow_api.json")
+    
+    if st.button("전체 컷 이미지 생성 대기열(Queue) 등록"):
+        prompts = st.session_state['current_prompts']
+        
+        # 진행률 표시줄 추가
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        success_count = 0
+        total_cuts = len(prompts)
+        
+        for idx, p in enumerate(prompts):
+            status_text.text(f"Cut {p['cut']} 작업을 ComfyUI로 전송 중... ({idx+1}/{total_cuts})")
+            
+            # ComfyUI 전송 모듈 호출 (배치 사이즈 5 고정)
+            is_success = queue_comfyui_prompt(
+                comfy_url=comfyui_server_url,
+                workflow_path=workflow_json_name,
+                positive_text=p['positive_prompt'],
+                negative_text=p['negative_prompt'],
+                batch_size=5
+            )
+            
+            if is_success:
+                success_count += 1
             else:
-                st.error("프롬프트 생성에 실패했습니다.")
+                st.error(f"Cut {p['cut']} 전송 실패. (서버 연결 또는 노드 ID 확인 필요)")
+                break # 하나라도 실패하면 중단
+                
+            # 진행률 업데이트
+            progress_bar.progress((idx + 1) / total_cuts)
+            
+        if success_count == total_cuts:
+            status_text.text("모든 컷의 생성 요청이 완료되었습니다!")
+            st.success("ComfyUI 백그라운드에서 이미지가 생성되고 있습니다. ComfyUI 터미널 창을 확인하세요.")
+            st.info("다음 단계: 생성이 완료된 이미지들을 가져와서 화면에 띄우고 선택하는 작업이 필요합니다.")
