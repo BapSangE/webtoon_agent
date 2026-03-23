@@ -1,34 +1,37 @@
 # getdata.py
 import requests
+import xmltodict # 추가된 라이브러리 (pip install xmltodict 필요)
 
-def fetch_activist_data(api_key: str, search_date: str) -> list:
+def fetch_activist_data(movement_code: str):
     """
-    공공데이터 포털 API를 호출하여 독립운동가 데이터를 수집합니다.
+    API를 호출하여 원본 XML과 파이썬 딕셔너리(JSON 형태)로 변환된 데이터를 모두 반환합니다.
     """
-    # 실제 API 엔드포인트 URL로 교체해야 합니다.
+    # 실제 API 엔드포인트 URL로 교체 필요
     url = "https://search.i815.or.kr/openApiData.do"
     
     params = {
-        "serviceKey": api_key,
-        "pageNo": "1",
-        "numOfRows": "10",
-        "returnType": "json",
+        "type": "4", # 인명사전 고정
+        "movementFamily": movement_code,
+        "isForeigner": "0",
+        "page": "1"
     }
 
     try:
         response = requests.get(url, params=params)
         
         if response.status_code == 200:
-            # data = response.json()
-            # 실제 데이터 추출 로직 필요
+            xml_data = response.text
             
-            # 테스트용 가상 데이터 반환
-            return [{"name": "API_테스트_인물", "activity": f"{search_date} 관련 활동 데이터"}]
+            # XML을 파이썬 딕셔너리로 자동 변환
+            # API 응답이 정상적인 XML이 아닐 경우 에러가 날 수 있으므로 예외 처리가 포함되어야 안전합니다.
+            try:
+                dict_data = xmltodict.parse(xml_data)
+            except Exception as parse_error:
+                dict_data = {"error": f"XML 파싱 실패: {parse_error}"}
+                
+            return xml_data, dict_data
         else:
-            # UI가 없는 파일이므로 print나 에러 메시지를 반환값으로 처리합니다.
-            print(f"API 호출 실패: 에러 코드 {response.status_code}")
-            return []
+            return f"<error>API 호출 실패: 에러 코드 {response.status_code}</error>", None
             
     except Exception as e:
-        print(f"서버 통신 중 오류 발생: {e}")
-        return []
+        return f"<error>서버 통신 중 오류 발생: {e}</error>", None
