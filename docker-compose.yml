@@ -1,0 +1,19 @@
+# docker-compose.yml
+
+version: '3.8'
+services:
+  db:
+    image: postgres:17 # 공식 PostgreSQL 15 버전 이미지를 다운로드하여 사용합니다.
+    container_name: webtoon_postgres # 실행될 DB 서버의 이름입니다.
+    environment:
+      POSTGRES_USER: user        # DB 접속 아이디
+      POSTGRES_PASSWORD: qwer # DB 접속 비밀번호
+      POSTGRES_DB: webtoon_db      # 생성할 데이터베이스 이름
+    ports:
+      - "5432:5432" # 내 컴퓨터의 5432 포트와 DB 컨테이너의 5432 포트를 연결합니다.
+    volumes:
+      - ./postgresql/data:/var/lib/postgresql/data # DB 내부의 데이터를 내 컴퓨터 하드디스크에 연동하여 영구 보존합니다.
+    restart: always # 컴퓨터가 켜지면 DB도 항상 자동으로 켜지게 합니다.
+
+volumes:
+  postgres_data:

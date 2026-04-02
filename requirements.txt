@@ -1,0 +1,6 @@
+streamlit
+google-generativeai
+sqlalchemy
+psycopg2-binary
+pillow
+requests

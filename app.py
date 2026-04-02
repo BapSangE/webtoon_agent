@@ -1,317 +1,412 @@
 import streamlit as st
-
-# 분리된 모듈 임포트 (같은 폴더에 해당 .py 파일들이 있어야 함)
 import os
 import shutil
+import json
+import requests
 from PIL import Image
-from getdata import fetch_activist_data
+from database import SessionLocal, Activist, WebtoonProject
 from generatestory import generate_storyboard
 from generateprompts import generate_image_prompts
-from generateimages import queue_comfyui_prompt
+from generateimages import queue_comfyui_prompt,queue_inpaint_prompt
 from start_server import launch_comfyui_server
 
-def extract_items_safely(parsed_dict: dict) -> list:
-    """공공데이터 API의 XML 파싱 결과에서 인물 리스트를 안전하게 추출하는 함수"""
+
+    # ComtyUI Path,URL
+comfyui_path = st.text_input("ComfyUI 폴더 절대 경로 확인 :", value=r"C:/comfyuipj/ComfyUI")
+comfyui_url = st.text_input("ComfyUI 서버 주소 확인:", value="http://127.0.0.1:8188")
+
+# ComfyUI 생성 강제 중단 함수
+def stop_comfyui_generation(comfy_url: str):
     try:
-        items = parsed_dict.get('root', {}).get('item', None)
-        if not items:
-            return []
-        
-        if isinstance(items, dict):
-            return [items]
-        elif isinstance(items, list):
-            return items
-        else:
-            return []
+        # 1. 큐(대기열) 전체 비우기
+        requests.post(f"{comfy_url}/queue", json={"clear": True}, timeout=2)
+        # 2. 현재 진행 중인 연산 물리적 강제 중단
+        requests.post(f"{comfy_url}/interrupt", timeout=2)
+        return True
     except Exception as e:
-        print(f"데이터 파싱 중 에러 발생: {e}")
-        return []
+        return False
 
 # ==========================================
-# 화면 기본 설정 및 세션 초기화
+# 화면 기본 설정 및 UI 스타일 주입
 # ==========================================
 st.set_page_config(page_title="독립운동가 웹툰 에이전트", page_icon="📜", layout="centered")
 
+def apply_custom_ui():
+    st.markdown("""
+    <style>
+    @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+    html, body, [class*="css"] { font-family: 'Pretendard', sans-serif; }
+    .stApp { background-color: #f8fafc; }
+    [data-testid="stSidebar"] { background-color: #0f172a !important; }
+    [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
+    div.stButton > button {
+        background-color: #0ea5e9; color: #ffffff !important; border-radius: 8px;
+        border: none; padding: 0.5rem 1rem; font-weight: 600; width: 100%;
+    }
+    div[data-testid="stExpander"], div[data-testid="stForm"] {
+        background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(10px);
+        border: 1px solid #e2e8f0; border-radius: 12px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+apply_custom_ui()
+
+# ==========================================
+# 스크롤 가능한 원본 이미지 팝업 함수
+# ==========================================
+@st.dialog("🔍 원본 크기 보기 (상하 스크롤 가능)", width="large")
+def show_large_image(img_path):
+    img = Image.open(img_path)
+    st.image(img, use_container_width=True)
+
+# 세션 상태 초기화
+if 'activists_list' not in st.session_state: st.session_state['activists_list'] = []
+if 'current_story_data' not in st.session_state: st.session_state['current_story_data'] = {}
+if 'current_prompts' not in st.session_state: st.session_state['current_prompts'] = []
+if 'parsed_data' not in st.session_state: st.session_state['parsed_data'] = {}
+
 st.title("📜 독립운동가 웹툰 제작 에이전트")
-
-# 세션 상태 보존
-if 'activists_list' not in st.session_state:
-    st.session_state['activists_list'] = []
-if 'current_story_data' not in st.session_state:
-    st.session_state['current_story_data'] = {}
-if 'current_prompts' not in st.session_state:
-    st.session_state['current_prompts'] = []
-
-# 공통 API 키 입력
 gemini_key_input = st.text_input("Gemini API 키를 입력하세요:", type="password")
 
 # ==========================================
-# 1단계: 독립운동 계열 선택 및 명단 검색
+# 사이드바: 0단계(히스토리) 및 1단계(인물 검색)
 # ==========================================
-st.subheader("1. 독립운동 계열 선택 및 명단 검색")
+db = SessionLocal()
 
-movement_dict = {
-    "3.1운동": "AA", "3.1운동지원": "AB", "계몽운동": "AC",
-    "광복군": "AE", "국내항일": "AG", "만주방면": "AJ",
-    "의병": "AN", "의열투쟁": "AO", "임시정부": "AR", "학생운동": "AU"
-}
-
-selected_movement_name = st.selectbox("검색할 운동 계열을 선택해주세요:", list(movement_dict.keys()))
-selected_code = movement_dict[selected_movement_name]
-
-if st.button("1단계: 해당 계열 독립운동가 명단 검색"):
-    with st.spinner('공공데이터 서버와 통신하고 있습니다...'):
-        raw_xml, parsed_dict = fetch_activist_data(movement_code=selected_code)
-        
-        if parsed_dict and "error" not in parsed_dict:
-            items = extract_items_safely(parsed_dict)
+with st.sidebar:
+    st.header("📂 0. 이전 작업 불러오기")
+    try:
+        past_projects = db.query(WebtoonProject, Activist).join(Activist).order_by(WebtoonProject.created_at.desc()).all()
+        if past_projects:
+            project_options = ["새로 시작하기"] + [
+                f"[{p.WebtoonProject.project_id}] {p.Activist.name_ko} ({p.WebtoonProject.created_at.strftime('%m-%d %H:%M')})" 
+                for p in past_projects
+            ]
+            selected_project_str = st.selectbox("저장된 프로젝트 선택", project_options)
             
-            if items:
-                st.session_state['activists_list'] = items
-                # 새로운 검색 시 하위 단계 데이터 초기화
-                st.session_state['current_story_data'] = {}
-                st.session_state['current_prompts'] = []
-                st.success(f"총 {len(items)}명의 데이터를 찾았습니다. 아래에서 인물을 선택하세요.")
-            else:
-                st.error("XML 데이터 파싱 완료. 하지만 해당 계열에 등록된 인물 데이터가 없습니다.")
-                st.session_state['activists_list'] = []
-        else:
-            st.error("공공데이터를 정상적으로 가져오지 못했습니다.")
-
-# ==========================================
-# 2단계: 웹툰 주인공 선택 및 스토리보드 생성
-# ==========================================
-if st.session_state['activists_list']:
-    st.write("---")
-    st.subheader("2. 웹툰의 주인공 선택 및 대본 생성")
-    
-    options = []
-    for person in st.session_state['activists_list']:
-        p_name = person.get('name', '이름불명')
-        p_activity = person.get('activities', '내용없음')
-        display_text = f"{p_name} - {str(p_activity)[:30]}..."
-        options.append(display_text)
-    
-    selected_index = st.selectbox("인물 선택:", range(len(options)), format_func=lambda x: options[x])
-    selected_person_data = st.session_state['activists_list'][selected_index]
-    
-    with st.expander("📌 선택한 인물 원본 데이터 보기"):
-        st.json(selected_person_data)
-
-    if st.button("2단계: 선택한 인물로 스토리보드 생성 시작"):
-        if not gemini_key_input:
-            st.warning("Gemini API 키를 먼저 입력해주세요.")
-        else:
-            with st.spinner('선택한 인물의 데이터로 대본을 창작하고 팩트체크 중입니다...'):
-                story_data = generate_storyboard(gemini_api_key=gemini_key_input, parsed_data=selected_person_data)
+            if selected_project_str != "새로 시작하기":
+                proj_id = int(selected_project_str.split("]")[0].replace("[", ""))
                 
-                if story_data and "storyboard" in story_data:
-                    st.success("스토리보드 생성이 완료되었습니다.")
-                    st.session_state['current_story_data'] = story_data
-                    st.session_state['current_prompts'] = [] # 스토리 변경 시 프롬프트 초기화
-                else:
-                    st.error("스토리보드 생성에 실패했거나 JSON 구조가 올바르지 않습니다.")
+                # [수정됨] 복원 버튼과 삭제 버튼을 나란히 배치하기 위해 컬럼 분할
+                btn_cols = st.columns(2)
+                
+                # 1. 복원 버튼 로직
+                with btn_cols[0]:
+                    if st.button("📂 복원하기", use_container_width=True):
+                        target_proj = db.query(WebtoonProject).filter(WebtoonProject.project_id == proj_id).first()
+                        target_activist = db.query(Activist).filter(Activist.id == target_proj.activist_id).first()
+                        
+                        st.session_state['current_project_id'] = target_proj.project_id
+                        st.session_state['parsed_data'] = {
+                            "name": target_activist.name_ko,
+                            "content": target_activist.content,
+                            "activities": target_activist.activities,
+                            "born_died": target_activist.born_died,
+                            "engaged_organizations": target_activist.engaged_organizations
+                        }
+                        st.session_state['current_story_data'] = {
+                            "character_appearance": target_proj.character_appearance,
+                            "storyboard": target_proj.storyboard_json
+                        }
+                        st.session_state['current_prompts'] = target_proj.prompts_json if target_proj.prompts_json else []
+                        st.success(f"{target_activist.name_ko} 지사님 데이터 복원 완료")
+                
+                # 2. 삭제 버튼 로직
+                with btn_cols[1]:
+                    if st.button("🗑️ 삭제하기", use_container_width=True):
+                        target_proj = db.query(WebtoonProject).filter(WebtoonProject.project_id == proj_id).first()
+                        if target_proj:
+                            db.delete(target_proj)
+                            db.commit()
+                            st.rerun() # 삭제 완료 후 즉시 화면을 새로고침하여 목록 갱신
+        else:
+            st.info("저장된 프로젝트가 없습니다.")
+    except Exception as e:
+        st.error(f"히스토리 로드 에러: {e}")
 
-# 생성된 스토리 데이터 출력 (세션에 존재할 경우 항상 출력)
-if st.session_state['current_story_data']:
-    story_data = st.session_state['current_story_data']
-    st.write("### 👤 캐릭터 외모 설정 (일관성 유지용)")
-    st.info(story_data.get('character_appearance', '외모 정보 처리 누락'))
+    st.markdown("---")
+    st.header("1. 독립운동가 검색")
+    movement_type = st.selectbox("운동 계열 선택", ["3.1운동", "계몽운동", "광복군", "국내항일", "의병", "의열투쟁", "임시정부"])
+    activists = db.query(Activist).filter(Activist.movement_type == movement_type).order_by(Activist.name_ko.asc()).all()
+    if activists:
+        activist_names = [f"{a.name_ko} ({a.born_died})" for a in activists]
+        selected_name_full = st.selectbox("인물 선택", activist_names)
+        selected_name = selected_name_full.split(" (")[0]
+        current_activist = next(a for a in activists if a.name_ko == selected_name)
+        
+        if st.button("데이터 확정 및 분석 시작"):
+            st.session_state['parsed_data'] = {
+                "name": current_activist.name_ko,
+                "content": current_activist.content,
+                "activities": current_activist.activities,
+                "born_died": current_activist.born_died,
+                "engaged_organizations": current_activist.engaged_organizations
+            }
+            st.success(f"{current_activist.name_ko} 지사 데이터 로드 완료")
+    # 사이드바 하단 - 시스템 제어 영역
+    st.markdown("---")
+    st.subheader("⚙️ 시스템 제어")
     
-    st.write("### 📝 완성된 웹툰 스토리보드 (팩트체크 완료)")
-    for cut in story_data['storyboard']:
-        with st.expander(f"Cut {cut['cut']}"):
-            st.markdown(f"**지문:** {cut['description']}")
-            st.markdown(f"**대사:** {cut['dialogue']}")
+    st.warning("이미지 생성이 너무 오래 걸리거나 잘못된 요청이 들어간 경우 아래 버튼을 누르세요.")
+    if st.button("🛑 진행 중인 생성 강제 중단", use_container_width=True, type="primary"):
+        is_stopped = stop_comfyui_generation(comfyui_url)
+        if is_stopped:
+            st.success("✅ ComfyUI 연산 및 대기열이 완전히 중단되었습니다.")
+        else:
+            st.error("❌ 중단 요청 실패. 서버 연결을 확인하세요.")
+
+db.close()
 
 # ==========================================
-# 3단계: 이미지 생성 프롬프트 자동 작성
+# 2~3단계: 스토리 및 프롬프트 생성 (DB 저장 + 화면 출력)
 # ==========================================
-if st.session_state['current_story_data']:
+if st.session_state.get('parsed_data'):
+    st.write("---")
+    st.subheader("2. 웹툰 스토리보드 생성")
+    if st.button("2단계: 스토리보드 생성 시작"):
+        if not gemini_key_input: 
+            st.warning("API 키를 입력하세요.")
+        else:
+            with st.spinner('스토리 생성 중...'):
+                story_data = generate_storyboard(gemini_api_key=gemini_key_input, parsed_data=st.session_state['parsed_data'])
+                if story_data:
+                    st.session_state['current_story_data'] = story_data
+                    
+                    # DB 저장 로직 (INSERT)
+                    db = SessionLocal()
+                    try:
+                        activist = db.query(Activist).filter(Activist.name_ko == st.session_state['parsed_data']['name']).first()
+                        if activist:
+                            new_project = WebtoonProject(
+                                activist_id=activist.id,
+                                character_appearance=story_data['character_appearance'],
+                                storyboard_json=story_data['storyboard']
+                            )
+                            db.add(new_project)
+                            db.commit()
+                            db.refresh(new_project)
+                            st.session_state['current_project_id'] = new_project.project_id
+                    except Exception as e:
+                        st.error(f"DB 저장 오류: {e}")
+                    finally:
+                        db.close()
+                        
+                    st.success("스토리보드 생성 및 DB 저장 완료")
+
+    # [복구됨] 2단계 데이터 화면 출력 UI
+    if st.session_state.get('current_story_data'):
+        st.markdown("#### 👤 캐릭터 외모 설정")
+        st.info(st.session_state['current_story_data']['character_appearance'])
+        
+        st.markdown("#### 📖 컷별 스토리보드")
+        for cut in st.session_state['current_story_data']['storyboard']:
+            bg_text = cut.get('visual_elements', {}).get('background', '배경 미지정')
+            time_text = cut.get('visual_elements', {}).get('time_of_day', '시간 미지정') # 기존에 time_of_day가 없다면 제외 가능
+            
+            desc_text = cut.get('description', '')
+            narra_text = cut.get('narration', '') # [추가됨] 자막 데이터 로드
+            dial_text = cut.get('dialogue', '')
+            
+            # visual_elements가 통째로 딕셔너리로 들어오므로 문자열로 변환하여 출력
+            vis_text = str(cut.get('visual_elements', '')) 
+            
+            with st.expander(f"🎬 Cut {cut.get('cut', '?')} : {bg_text}"):
+                st.write(f"**지문:** {desc_text}")
+                st.write(f"**자막(내레이션):** {narra_text}") # [추가됨] 화면에 자막 출력
+                st.write(f"**대사:** {dial_text}")
+                st.write(f"**시각 요소:** {vis_text}")
+
+
+if st.session_state.get('current_story_data'):
     st.write("---")
     st.subheader("3. 이미지 생성 프롬프트 자동 작성")
-    
-    if st.button("3단계: 스토리보드 기반 Animagine 프롬프트 생성"):
-        if not gemini_key_input:
-            st.warning("Gemini API 키를 먼저 입력해주세요.")
-        else:
-            with st.spinner('컷별 Danbooru 태그를 분석하고 생성 중입니다...'):
-                story_data = st.session_state['current_story_data']
-                prompts = generate_image_prompts(
-                    gemini_api_key=gemini_key_input,
-                    character_appearance=story_data['character_appearance'],
-                    storyboard=story_data['storyboard']
-                )
+    if st.button("3단계: 프롬프트 태그 생성"):
+        with st.spinner('태그 분석 중...'):
+            prompts = generate_image_prompts(
+                gemini_api_key=gemini_key_input,
+                character_appearance=st.session_state['current_story_data']['character_appearance'],
+                storyboard=st.session_state['current_story_data']['storyboard']
+            )
+            if prompts:
+                st.session_state['current_prompts'] = prompts
                 
-                if prompts:
-                    st.success("프롬프트 생성이 완료되었습니다.")
-                    st.session_state['current_prompts'] = prompts
-                else:
-                    st.error("프롬프트 생성에 실패했습니다.")
+                # DB 업데이트 로직 (UPDATE)
+                if 'current_project_id' in st.session_state:
+                    db = SessionLocal()
+                    try:
+                        project = db.query(WebtoonProject).filter(WebtoonProject.project_id == st.session_state['current_project_id']).first()
+                        if project:
+                            project.prompts_json = prompts
+                            db.commit()
+                    except Exception as e:
+                        st.error(f"프롬프트 DB 업데이트 오류: {e}")
+                    finally:
+                        db.close()
+                        
+                st.success("프롬프트 생성 및 DB 업데이트 완료")
 
-# 생성된 프롬프트 데이터 출력
-if st.session_state['current_prompts']:
-    prompts = st.session_state['current_prompts']
-    for p in prompts:
-        with st.container():
-            st.markdown(f"**[Cut {p['cut']}]**")
-            st.code(f"Positive: {p['positive_prompt']}\nNegative: {p['negative_prompt']}", language="text")
+    # [복구됨] 3단계 프롬프트 화면 출력 UI
+    if st.session_state.get('current_prompts'):
+        st.markdown("#### 📝 컷별 생성 프롬프트")
+        for p in st.session_state['current_prompts']:
+            with st.expander(f"⚙️ Cut {p['cut']} 프롬프트"):
+                st.markdown("**Positive Prompt:**")
+                st.code(p['positive_prompt'], language='text')
+                st.markdown("**Negative Prompt:**")
+                st.code(p['negative_prompt'], language='text')
 
 # ==========================================
-# 4단계: ComfyUI 서버 구동 및 이미지 생성 (app.py 수정 부분)
+# 4단계: ComfyUI 연동 및 자동화 생성 (수정본)
 # ==========================================
-if st.session_state['current_prompts']:
+if st.session_state.get('current_prompts'):
     st.write("---")
     st.subheader("4. ComfyUI 연동 및 백그라운드 이미지 생성")
+
+    st.info("💡 시스템이 프롬프트를 분석하여 '일반' 혹은 '국기 합성(SAM)' 워크플로우를 자동 선택합니다.")
     
-    # Git 설치 경로로 기본값 변경
-    comfyui_absolute_path = st.text_input(
-        "ComfyUI 폴더 절대 경로:", 
-        value=r"C:/webtoon_agent/ComfyUI"
-    )
-    comfyui_server_url = st.text_input("ComfyUI 서버 주소:", value="http://127.0.0.1:8188")
-    workflow_json_name = st.text_input("ComfyUI 워크플로우 파일명:", value="webtoon_randomseed.json")
-    
-    if st.button("4단계: 전체 컷 이미지 생성 대기열(Queue) 등록"):
-        prompts = st.session_state['current_prompts']
-        
-        # 1. 서버 부팅 로직
-        with st.spinner("ComfyUI 서버 상태를 확인하고 부팅합니다... (최대 1분 소요)"):
-            is_server_ready = launch_comfyui_server(comfy_folder_path=comfyui_absolute_path, url=comfyui_server_url)
-        
-        if not is_server_ready:
-            st.error("ComfyUI 서버 부팅 실패. 폴더 경로를 확인하시거나 수동으로 켜주세요.")
-        else:
-            st.success("서버 접속 완료. 대기열 전송을 시작합니다.")
-            
-            # 2. 이미지 생성 전송 로직
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            success_count = 0
-            total_cuts = len(prompts)
-            
-            for idx, p in enumerate(prompts):
-                status_text.text(f"Cut {p['cut']} 작업을 ComfyUI로 전송 중... ({idx+1}/{total_cuts})")
+    if st.button("4단계: 전체 컷 생성 대기열 등록"):
+        with st.spinner("서버 부팅 확인 중..."):
+            if launch_comfyui_server(comfy_folder_path=comfyui_path, url=comfyui_url):
+                progress_bar = st.progress(0)
+                success_count = 0
+                total = len(st.session_state['current_prompts'])
+                activist_name = st.session_state['parsed_data']['name']
                 
-                is_success = queue_comfyui_prompt(
-                    comfy_url=comfyui_server_url,
-                    workflow_path=workflow_json_name,
-                    positive_text=p['positive_prompt'],
-                    negative_text=p['negative_prompt'],
-                    cut_number=p['cut'], # <- 이 부분이 추가되어야 합니다.
-                    batch_size=5
-                )
+                for idx, p in enumerate(st.session_state['current_prompts']):
+                    # 수정됨: workflow_path 제거, activist_name 추가
+                    is_success = queue_comfyui_prompt(
+                        comfy_url=comfyui_url,
+                        positive_text=p['positive_prompt'],
+                        negative_text=p['negative_prompt'],
+                        cut_number=p['cut'],
+                        activist_name=activist_name,
+                        batch_size=5
+                    )
+                    if is_success: success_count += 1
+                    progress_bar.progress((idx + 1) / total)
                 
-                if is_success:
-                    success_count += 1
-                else:
-                    st.error(f"Cut {p['cut']} 전송 실패. (서버 연결 또는 JSON 노드 ID 확인 필요)")
-                    break
-                    
-                progress_bar.progress((idx + 1) / total_cuts)
-                
-            if success_count == total_cuts:
-                status_text.text("모든 컷의 생성 요청이 완료되었습니다!")
-                st.success("ComfyUI 백그라운드에서 이미지가 생성되고 있습니다. 다음 단계에서 이미지를 확인하세요.")
+                if success_count == total: st.success(f"모든 컷 전송 완료 (폴더: output/{activist_name})")
+
 # ==========================================
-# 7단계: 생성된 이미지 확인 및 최종 컷 선택
+# 7단계: 인물별 폴더 기반 이미지 확인 및 선택 (수정본)
 # ==========================================
-if st.session_state['current_prompts']:
+if st.session_state.get('current_prompts'):
     st.write("---")
-    st.subheader("7. 생성 이미지 확인 및 최종 컷 선택 (Human-in-the-Loop)")
+    st.subheader("7. 생성 이미지 확인 및 최종 컷 선택")
     
-    output_dir = os.path.join(comfyui_absolute_path, "output")
-    final_dir = os.path.join(os.getcwd(), "final_webtoon") # 현재 프로젝트 폴더 아래에 생성
+    activist_name = st.session_state['parsed_data']['name']
+    safe_name = activist_name.replace(" ", "_")
+    output_dir = os.path.join(comfyui_path, "output", safe_name)
+    final_dir = os.path.join(os.getcwd(), f"final_webtoon_{safe_name}")
     
-    if not os.path.exists(output_dir):
-        st.warning(f"ComfyUI 출력 폴더({output_dir})를 찾을 수 없습니다. 아직 생성 전이거나 경로가 다릅니다.")
-    else:
-        if st.button("출력 폴더에서 생성된 이미지 불러오기"):
+    if st.button("인물 전용 폴더에서 이미지 불러오기"):
+        if os.path.exists(output_dir):
             st.session_state['image_selection_mode'] = True
-            
-    if st.session_state.get('image_selection_mode', False):
-        st.success("이미지를 성공적으로 불러왔습니다. 각 컷마다 가장 마음에 드는 1장을 선택하세요.")
+        else:
+            st.error(f"폴더를 찾을 수 없습니다: {output_dir}")
+
+    if st.session_state.get('image_selection_mode'):
+        selected_images = {}
+        storyboard = st.session_state['current_story_data'].get('storyboard', [])
         
-        selected_images_per_cut = {}
-        
-        # 컷별로 UI 생성
         for p in st.session_state['current_prompts']:
             cut_num = p['cut']
-            prefix = f"cut_{cut_num}_"
+            cut_images = [f for f in os.listdir(output_dir) if f.startswith(f"cut_{cut_num}_") and f.endswith(".png")]
+            cut_images.sort()
             
-            # 해당 컷의 접두사(prefix)를 가진 파일들만 수집
-            cut_images = [f for f in os.listdir(output_dir) if f.startswith(prefix) and f.endswith(".png")]
-            cut_images.sort() # 생성 순서대로 정렬
-            
-            with st.expander(f"🎬 Cut {cut_num} 이미지 선택 (후보 {len(cut_images)}장)", expanded=True):
-                if not cut_images:
-                    st.error(f"Cut {cut_num}에 해당하는 생성 이미지가 없습니다. ComfyUI 진행 상태를 확인하세요.")
-                    continue
+            with st.expander(f"🎬 Cut {cut_num} (후보 {len(cut_images)}장)", expanded=True):
+                cut_text = next((item for item in storyboard if item["cut"] == cut_num), None)
+                if cut_text:
+                    desc_text = cut_text.get('description', '')
+                    narra_text = cut_text.get('narration', '')
+                    dial_text = cut_text.get('dialogue', '')
+                    st.info(f"**지문:** {desc_text} \n\n **자막:** {narra_text} \n\n **대사:** {dial_text}")
                 
-                # 라디오 버튼을 가로로 배치하기 위한 꼼수 (선택지 텍스트)
-                options = [f"후보 {i+1}" for i in range(len(cut_images))]
+                # 1. 인페인팅(태극기 합성) 완료 파일 스캔 및 최상단 표시
+                inpaint_files = [f for f in os.listdir(output_dir) if f.startswith(f"inpaint_cut_{cut_num}_") and f.endswith(".png")]
                 
-                # 5개의 열을 만들어 이미지 나란히 배치
-                cols = st.columns(len(cut_images))
-                for i, img_file in enumerate(cut_images):
-                    img_path = os.path.join(output_dir, img_file)
-                    try:
-                        img = Image.open(img_path)
-                        cols[i].image(img, caption=f"후보 {i+1}", use_container_width=True)
-                    except Exception as e:
-                        cols[i].error("이미지 로드 실패")
-                
-                # 이미지 아래에 라디오 버튼 배치 (사용자가 1장 선택)
-                selected_option = st.radio(f"Cut {cut_num} 최종 선택:", options, horizontal=True, key=f"radio_cut_{cut_num}")
-                selected_idx = options.index(selected_option)
-                
-                # 선택된 파일명을 딕셔너리에 저장
-                selected_images_per_cut[cut_num] = os.path.join(output_dir, cut_images[selected_idx])
-        
-        # ==========================================
-        # 최종 웹툰 폴더로 복사 및 대사/지문 미리보기
-        # ==========================================
-        st.write("---")
-        if st.button("✅ 선택한 이미지 최종 웹툰 폴더로 저장하기"):
-            os.makedirs(final_dir, exist_ok=True)
-            
-            success_copy = 0
-            for cut_num, source_path in selected_images_per_cut.items():
-                target_path = os.path.join(final_dir, f"최종_cut_{cut_num}.png")
-                try:
-                    shutil.copy2(source_path, target_path)
-                    success_copy += 1
-                except Exception as e:
-                    st.error(f"Cut {cut_num} 저장 실패: {e}")
+                if inpaint_files:
+                    # 가장 최근에 만들어진 합성본 1장만 추출
+                    inpaint_files.sort(key=lambda x: os.path.getmtime(os.path.join(output_dir, x)), reverse=True)
+                    latest_inpaint_path = os.path.join(output_dir, inpaint_files[0])
                     
-            if success_copy == len(selected_images_per_cut):
-                st.success(f"총 {success_copy}장의 최종 이미지가 '{final_dir}' 폴더에 안전하게 저장되었습니다.")
-                
-                # --- 여기서부터 추가된 미리보기 UI 로직 ---
-                st.write("---")
-                st.subheader("📺 최종 웹툰 결과물 미리보기")
-                
-                # 세션에서 대본 데이터 가져오기
-                storyboard_data = st.session_state['current_story_data'].get('storyboard', [])
-                
-                # 컷 번호 순서대로 정렬하여 출력
-                for cut_num in sorted(selected_images_per_cut.keys()):
-                    # 해당 컷 번호와 일치하는 대본 찾기
-                    cut_text = next((item for item in storyboard_data if item["cut"] == cut_num), None)
+                    st.success("✅ 🇰🇷 가장 최근에 합성된 태극기 이미지입니다. (마음에 들지 않으면 아래에서 다른 원본을 골라 다시 합성하세요)")
+                    st.image(Image.open(latest_inpaint_path), caption=f"Cut {cut_num} 최종 합성본", use_container_width=True)
                     
-                    st.write(f"### 🎬 Cut {cut_num}")
+                    # 최종 저장 경로를 우선적으로 합성본으로 세팅
+                    selected_images[cut_num] = latest_inpaint_path
+                    st.markdown("---")
+                
+                # 2. 원본 후보 선택 UI
+                if cut_images:
+                    st.markdown("#### 🖼️ 원본 후보 선택 (재합성용)")
+                    st.info("💡 팁: [🔍 확대] 버튼을 누르면 위아래가 잘리지 않고 스크롤 가능한 큰 창이 열립니다.")
                     
-                    # 1. 최종 선택된 이미지 화면에 출력
-                    final_img_path = os.path.join(final_dir, f"최종_cut_{cut_num}.png")
-                    try:
-                        st.image(final_img_path, use_container_width=True)
-                    except Exception as e:
-                        st.error(f"이미지 출력 오류: {e}")
+                    cols = st.columns(len(cut_images))
+                    for i, img_file in enumerate(cut_images):
+                        img_path = os.path.join(output_dir, img_file)
+                        with cols[i]:
+                            # 이미지 렌더링
+                            img = Image.open(img_path)
+                            st.image(img, caption=f"후보 {i+1}", use_container_width=True)
+                            
+                            # [수정됨] 확대 버튼과 삭제 버튼을 나란히 배치하기 위한 하위 컬럼 분할
+                            btn_cols = st.columns(2)
+                            with btn_cols[0]:
+                                if st.button("🔍 확대", key=f"zoom_{cut_num}_{img_file}"):
+                                    show_large_image(img_path) # 최상단에 정의한 팝업 함수 호출
+                            with btn_cols[1]:
+                                if st.button("🗑️ 삭제", key=f"del_{cut_num}_{img_file}"):
+                                    try:
+                                        os.remove(img_path)
+                                        st.rerun() # 삭제 후 즉시 화면 새로고침
+                                    except Exception as e:
+                                        st.error(f"삭제 실패: {e}")
                     
-                    # 2. 매칭된 지문(자막)과 대사 출력
-                    if cut_text:
-                        st.info(f"**[지문/자막]** {cut_text['description']}")
-                        st.warning(f"**[대사]** {cut_text['dialogue']}")
-                    else:
-                        st.error("해당 컷의 대본 데이터를 찾을 수 없습니다.")
+                    # 삭제 후 남아있는 이미지들을 기준으로 라디오 버튼 렌더링
+                    sel = st.radio(f"Cut {cut_num} 원본 선택:", [f"후보 {i+1}" for i in range(len(cut_images))], horizontal=True, key=f"r_{cut_num}")
+                    
+                    selected_idx = int(sel.split()[-1]) - 1
+                    selected_image_path = os.path.join(output_dir, cut_images[selected_idx])
+                    
+                    # 만약 합성 파일이 단 하나도 없다면, 여기서 고른 원본을 최종 저장 경로로 세팅
+                    if not inpaint_files:
+                        selected_images[cut_num] = selected_image_path
+                    
+                    # 🔄 이 컷만 5장 다시 생성 버튼
+                    st.write("") 
+                    if st.button(f"🔄 Cut {cut_num} 후보 5장 추가 생성", key=f"re_gen_{cut_num}"):
+                        with st.spinner(f"Cut {cut_num}의 새로운 후보 5장을 요청 중..."):
+                            is_success = queue_comfyui_prompt(
+                                comfy_url=comfyui_url,
+                                positive_text=p['positive_prompt'],
+                                negative_text=p['negative_prompt'],
+                                cut_number=cut_num,
+                                activist_name=activist_name,
+                                batch_size=5
+                            )
+                            if is_success:
+                                st.success("ComfyUI 대기열에 추가되었습니다. 잠시 후 이미지가 생성되면 화면에 나타납니다.")
+                                st.rerun()
+                        
+                    # 3. 태극기 합성 버튼 항상 표시
+                    prompt_lower = p['positive_prompt'].lower()
+                    if "flag" in prompt_lower or "taegeukgi" in prompt_lower:
+                        st.warning("위에서 다른 원본을 고른 뒤 버튼을 누르면 태극기를 다시 합성합니다.")
+                        if st.button(f"🇰🇷 Cut {cut_num} 태극기 자동 합성 (재실행 가능)", key=f"btn_inpaint_{cut_num}"):
+                            with st.spinner("ComfyUI에서 태극기를 다시 합성 중입니다... (약 10초 소요)"):
+                                is_success = queue_inpaint_prompt(
+                                    comfy_url=comfyui_url,
+                                    comfyui_path=comfyui_path,
+                                    source_image_path=selected_image_path,
+                                    positive_text=p['positive_prompt'],
+                                    negative_text=p['negative_prompt'],
+                                    cut_number=cut_num,
+                                    activist_name=activist_name
+                                )
+                                if is_success:
+                                    # 합성 성공 시 즉시 새로고침하여 바뀐 이미지를 최상단에 로드
+                                    st.rerun() 
+                                else:
+                                    st.error("합성 실패. ComfyUI 로그를 확인하세요.")
