@@ -9,7 +9,46 @@ from generatestory import generate_storyboard
 from generateprompts import generate_image_prompts
 from generateimages import queue_comfyui_prompt,queue_inpaint_prompt
 from start_server import launch_comfyui_server
+import io
+import zipfile
+import csv
 
+def create_canva_export_zip(storyboard_json, image_paths_dict):
+    """
+    storyboard_json: LLM이 생성한 스토리보드 리스트 (예: [{"cut":1, "dialogue":"..."}, ...])
+    image_paths_dict: 생성된 이미지의 물리적 경로 딕셔너리 (예: {1: "./output/cut1.png", 2: ...})
+    """
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        # 1. Canva 대량 제작용 CSV 데이터 생성 (메모리)
+        csv_buffer = io.StringIO()
+        csv_writer = csv.writer(csv_buffer)
+        csv_writer.writerow(["Cut", "Image_File", "Description", "Narration", "Dialogue"])
+
+        for item in storyboard_json:
+            cut_num = item.get("cut")
+            desc = item.get("description", "")
+            narr = item.get("narration", "")
+            dial = item.get("dialogue", "")
+            
+            img_path = image_paths_dict.get(cut_num)
+            img_filename = f"cut_{cut_num}.png" if img_path else ""
+
+            # CSV 행 기록
+            csv_writer.writerow([cut_num, img_filename, desc, narr, dial])
+
+            # 2. 물리적 이미지 파일을 ZIP에 추가
+            if img_path:
+                try:
+                    zip_file.write(img_path, arcname=img_filename)
+                except FileNotFoundError:
+                    pass
+
+        # 3. 완성된 CSV를 ZIP에 추가 (한글 깨짐 방지를 위해 utf-8-sig 사용)
+        zip_file.writestr("canva_webtoon_script.csv", csv_buffer.getvalue().encode('utf-8-sig'))
+
+    return zip_buffer.getvalue()
 
     # ComtyUI Path,URL
 comfyui_path = st.text_input("ComfyUI 폴더 절대 경로 확인 :", value=r"C:/comfyuipj/ComfyUI")
@@ -410,3 +449,26 @@ if st.session_state.get('current_prompts'):
                                     st.rerun() 
                                 else:
                                     st.error("합성 실패. ComfyUI 로그를 확인하세요.")
+        # ==========================================
+        # 8단계: Canva 연동을 위한 최종 ZIP 추출 (여기에 붙여넣기!)
+        # ==========================================
+        st.markdown("---")
+        st.subheader("8. 최종 데이터 Canva 추출")
+        st.info("선택된 이미지와 대사본(CSV)을 한 번에 다운로드하여 Canva '대량 제작' 기능에 활용하세요.")
+        
+        # 선택된 이미지가 하나라도 있는지 확인
+        if selected_images:
+            try:
+                zip_data = create_canva_export_zip(storyboard, selected_images)
+                st.download_button(
+                    label="📦 이미지 + 대사본 ZIP 다운로드",
+                    data=zip_data,
+                    file_name=f"{safe_name}_canva_export.zip",
+                    mime="application/zip",
+                    type="primary",
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"ZIP 압축 중 오류 발생: {e}")
+        else:
+            st.warning("아직 생성되거나 선택된 이미지가 없습니다.")
