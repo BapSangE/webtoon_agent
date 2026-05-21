@@ -9,48 +9,46 @@ def generate_storyboard(gemini_api_key: str, parsed_data: dict) -> dict:
     context_text = json.dumps(parsed_data, ensure_ascii=False)
     
     # 1. Step 1: 스토리보드 초안 생성 프롬프트
-    system_instruction_1 = system_instruction = """
-You are a historical webtoon story writer and a prompt director for an AI image generator.
-Based on the provided data of the independence activist, create a storyboard of fewer than 20 cuts.
+    system_instruction_1 = """
+You are a professional historical webtoon story writer and a storyboard director.
+Based on the provided data of the independence activist, create a highly engaging webtoon storyboard of 6 to 10 cuts optimized for vertical scrolling.
 
-[Appearance & Background Knowledge Rules]
-1. Even if the provided text lacks physical descriptions, if the person is historically well-known (e.g., Ahn Jung-geun's mustache, missing ring finger, prison uniform), actively use your internal historical knowledge to describe them specifically.
-2. Only for unknown figures with no available physical data: set as "Common appearance of the era: (attire, hairstyle, physique fitting their social status)".
+[Webtoon Directing & Pacing Rules]
+1. Vertical Scroll Flow: Utilize a cinematic flow suitable for webtoons (e.g., Cut 1: Wide establishing shot -> Cut 2: Close-up on character's determined face -> Cut 3: Action/Incident).
+2. Readability: Keep 'dialogue' short and impactful, suitable for webtoon speech bubbles. Use 'narration' for time skips, historical context, or deep inner monologues.
+3. Cliffhanger/Climax: The final cut MUST be highly dramatic or emotional, leaving a strong lingering impact on the reader.
+4. Pacing: Condense the activist's life logically. Show clear transitions between different life stages (e.g., Youth -> Resistance -> Imprisonment/Martyrdom).
 
-[★CORE: Time-lapse & Visual Consistency Rules]
-1. Since this is a biography, you MUST set the aging process, facial hair, and outfit changes according to the passage of time (Childhood -> Youth -> Adulthood) and situations (Exile, Battle, Imprisonment).
-2. Categorize the appearance by period/situation in the 'character_appearance' field. Use specific numerical ages, colors, and materials instead of vague adjectives.
-3. When describing 'characters' in each cut, you MUST maintain strict visual consistency of age, facial features, and outfit colors from the previous cut, unless there is an explicit time skip.
+[Character & Visual Consistency Rules]
+1. Define the specific appearance (age, hairstyle, outfit, props) in 'character_appearance' categorized by life stages. (e.g., [Youth] short hair, white hanbok, [Resistance] fedora, black suit).
+2. Maintain strict visual consistency of the character across cuts unless a time skip occurs.
+3. Avoid overly depressing or grotesque depictions; maintain a dignified and majestic tone even in hardships.
 
-[Plot Twist & Directing Rules]
-1. The ending MUST include a dramatic plot twist to maximize immersion and leave a lingering impact.
-2. Do not distort historical facts or add fantasy elements. Use directing twists (e.g., unexpected identity reveal, shift in perspective, hidden sacrifice) within strict historical accuracy.
+[Visual Elements for AI Generation (Bridge to Danbooru Tags)]
+1. All values inside 'visual_elements' MUST be written in Danbooru-style ENGLISH TAGS (comma-separated). Do NOT use full sentences.
+2. Describe objects and backgrounds explicitly (e.g., instead of "prison", use "iron bars, dark room, stone wall").
+3. Specify camera angles/composition (e.g., extreme close-up, dutch angle, full body, from below) to make the webtoon dynamic.
 
-[Visual Elements & Camera Rules]
-1. Set diverse camera angles (close-up, high angle, low angle, back view, panorama, full body shot) for dynamic directing.
-2. Describe all nouns visually (shapes, colors, patterns) so the image AI does not misinterpret proper nouns. (e.g., instead of Taegeukgi -> a flag with a white background, red and blue Taegeuk circle, and four black trigrams).
-3. To directly feed the Stable Diffusion image generator, all values inside 'visual_elements' MUST be written in ENGLISH TAGS (comma-separated).
+[JSON Parsing Security Rules]
+1. NEVER use double quotes (") inside the text values of 'description', 'narration', or 'dialogue'. Use single quotes (') instead.
+2. If a field like narration or dialogue is not needed for a cut, leave it as an empty string (""). Do not delete the key.
 
-[Narration & Dialogue Rules]
-1. Separate situations that are awkward as dialogue (time skips, historical background, inner thoughts) into 'narration'.
-2. Do not force narration into every cut. Omit it if visual directing or dialogue is sufficient to control the pacing.
-3. If narration or dialogue is unnecessary for a cut, leave the JSON value as an empty string (""), do not delete the key.
+Output ONLY the valid JSON object format below. Output raw JSON only without markdown formatting (do NOT wrap in ```json).
 
-You MUST output ONLY the following JSON object format. Do not include markdown blocks or any other text.
 {
-  "character_appearance": "시기별/상황별 주인공의 상세 외모 및 복장 설정 (Write in KOREAN. e.g., [청년기-25세] 검은 머리, 쪽빛 저고리...)",
+  "character_appearance": "시기별/상황별 주인공 상세 외모 설정 (Write in KOREAN. e.g., [청년기-25세] 검은 머리, 안경, 흰색 저고리...)",
   "storyboard": [
     {
-      "cut": 1, 
+      "cut": 1,
       "visual_elements": {
-        "composition": "Camera angle and viewpoint (Write in ENGLISH tags. e.g., close-up, low angle, looking at viewer)",
-        "characters": "Specific age, expression, outfit, action of characters (Write in ENGLISH tags, maintain consistency with previous cut)",
-        "objects": "Visual description of key props (Write in ENGLISH tags)",
-        "background": "Place, time, weather, lighting (Write in ENGLISH tags)"
+        "composition": "English tags for camera angle (e.g., wide shot, looking up, from behind)",
+        "characters": "English tags for age, expression, action, specific clothes",
+        "objects": "English tags for props",
+        "background": "English tags for place, time, lighting, weather"
       },
-      "description": "화면에 표시될 전체 장면의 요약 지문 (Write in KOREAN)", 
-      "narration": "웹툰 컷 상단이나 하단에 삽입될 상황 설명 자막 또는 독백 (Write in KOREAN)",
-      "dialogue": "캐릭터의 대사 (Write in KOREAN)"
+      "description": "웹툰 작화를 위한 화면 연출 및 상황 요약 지문 (Write in KOREAN)",
+      "narration": "상황 해설이나 독백 자막 (Write in KOREAN)",
+      "dialogue": "말풍선에 들어갈 임팩트 있는 짧은 대사 (Write in KOREAN)"
     }
   ]
 }
@@ -68,17 +66,25 @@ You MUST output ONLY the following JSON object format. Do not include markdown b
         )
         draft_story = response_1.text
         
-        # [핵심 추가] 무료 티어 429 에러 방지를 위한 20초 강제 대기
-        print("초안 생성 완료. API 호출 제한(Rate Limit) 방어를 위해 20초간 대기합니다...")
-        time.sleep(20)
+        # [핵심 추가] 무료 티어 429 에러 방지를 위한 5초 강제 대기
+        print("초안 생성 완료. API 호출 제한(Rate Limit) 방어를 위해 5초간 대기합니다...")
+        time.sleep(5)
         
         # 2. Step 2: 팩트체크 및 최종 수정 프롬프트
         system_instruction_2 = """
-        너는 엄격한 역사학자야.
-        [원본 데이터]와 [웹툰 스토리 초안]을 비교해서 연도, 인물명, 업적 등 역사적 사실이 왜곡된 부분이 있다면 수정해.
-        수정된 최종 결과를 초안과 똑같은 JSON 객체 형식(character_appearance와 storyboard(visual_elements 포함))으로만 출력해.
-        마크다운(```json)을 포함하지 말고 오직 순수한 JSON 텍스트만 출력해.
-        """
+너는 엄격한 역사학자이자 웹툰 스토리 검수자야.
+[원본 데이터]와 [웹툰 스토리 초안]을 꼼꼼히 비교하여 연도, 인물명, 장소, 주요 업적 등 '역사적 팩트'가 왜곡된 부분이 있다면 정확하게 수정해.
+
+[검수 및 수정 규칙]
+1. 팩트 교정: 원본 데이터에 없는 허구의 역사적 사건이나 잘못된 정보가 있다면 즉시 수정해.
+2. 극적 허용 인정: 역사적 팩트가 맞다면, 인물의 감정 표현, 대사의 뉘앙스, 시각적 연출(visual_elements) 등 웹툰으로서의 극적 요소는 절대 건드리지 말고 유지해.
+3. 원본 유지: 검토 결과 역사적 오류가 전혀 없다면, 초안의 내용을 단 한 글자도 바꾸지 말고 그대로 반환해.
+
+[JSON 출력 규칙]
+1. 초안과 완벽하게 동일한 JSON 객체 구조(character_appearance와 storyboard(visual_elements 포함))만 반환해.
+2. JSON 파싱 에러를 방지하기 위해 텍스트 값 내부에 큰따옴표(")를 절대 사용하지 마. 필요시 작은따옴표(')를 사용해.
+3. 마크다운(```json) 기호나 너의 부연 설명, 인사말을 절대 포함하지 말고 오직 순수한 JSON 텍스트만 출력해.
+"""
         
         # 두 번째 API 호출 (팩트체크)
         response_2 = client.models.generate_content(

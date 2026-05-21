@@ -14,7 +14,7 @@ Perfectly analyze the provided 'character_appearance' and the 'visual_elements' 
 
 [Writing Rules]
 1. List tags separated by commas (,). Do NOT use full sentences.
-2. The absolute beginning of the positive prompt MUST be: "masterpiece, best quality, "
+2. The absolute beginning of the positive prompt MUST be exactly: "masterpiece, best quality, very aesthetic, absurdres, comic, webtoon, lineart, "
 3. Tag ordering: Character Appearance -> composition -> characters (expression/action) -> objects -> background.
 4. Refine and optimize the input English tags from 'visual_elements' to strictly fit the Danbooru tag syntax.
 5. Apply weights to key objects or unique compositions (e.g., (white flag:1.3)).
@@ -25,7 +25,7 @@ Perfectly analyze the provided 'character_appearance' and the 'visual_elements' 
 10. Do not write negative prompts. Output ONLY the positive prompts in the JSON array format below. Output raw JSON only without markdown formatting.
 
 [
-  {"cut": 1, "positive_prompt": "masterpiece, best quality, 1boy, (25-year-old:1.3), dignified, determined expression, upper body, cinematic lighting, ..."}
+  {"cut": 1, "positive_prompt": "masterpiece, best quality, very aesthetic, absurdres, comic, webtoon, lineart, 1boy, (25-year-old:1.3), dignified, determined expression, upper body, cinematic lighting, ..."}
 ]
 """
 

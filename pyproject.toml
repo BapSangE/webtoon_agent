@@ -6,8 +6,12 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "dotenv>=0.9.9",
-    "google-genai>=1.68.0",
+    "google-genai>=1.0.0",
+    "google-generativeai>=0.8.0",
     "requests>=2.32.5",
-    "streamlit>=1.55.0",
+    "streamlit>=1.30.0",
     "xmltodict>=1.0.4",
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "pillow>=10.0.0",
 ]

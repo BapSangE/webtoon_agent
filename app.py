@@ -183,6 +183,22 @@ with st.sidebar:
                 "engaged_organizations": current_activist.engaged_organizations
             }
             st.success(f"{current_activist.name_ko} 지사 데이터 로드 완료")
+    if st.session_state.get('parsed_data'):
+        st.markdown("---")
+        st.subheader("🖼️ 이미지 관리")
+        
+        # 경로 계산
+        activist_name = st.session_state['parsed_data']['name']
+        safe_name = activist_name.replace(" ", "_")
+        output_dir = os.path.join(comfyui_path, "output", safe_name)
+        
+        if st.button("📂 전용 폴더 이미지 불러오기", use_container_width=True, type="secondary"):
+            if os.path.exists(output_dir):
+                st.session_state['image_selection_mode'] = True
+                st.success("✅ 메인 화면(7단계)에 이미지가 로드되었습니다.")
+            else:
+                st.error(f"❌ 아직 생성된 폴더가 없습니다.")
+    
     # 사이드바 하단 - 시스템 제어 영역
     st.markdown("---")
     st.subheader("⚙️ 시스템 제어")
@@ -296,7 +312,7 @@ if st.session_state.get('current_story_data'):
                 st.code(p['negative_prompt'], language='text')
 
 # ==========================================
-# 4단계: ComfyUI 연동 및 자동화 생성 (수정본)
+# 4단계: ComfyUI 연동 및 백그라운드 이미지 생성
 # ==========================================
 if st.session_state.get('current_prompts'):
     st.write("---")
@@ -307,28 +323,46 @@ if st.session_state.get('current_prompts'):
     if st.button("4단계: 전체 컷 생성 대기열 등록"):
         with st.spinner("서버 부팅 확인 중..."):
             if launch_comfyui_server(comfy_folder_path=comfyui_path, url=comfyui_url):
+                
+                # 시각적 진행 상태 UI 구성
+                st.markdown("#### 📊 전체 컷 처리 진행 상황")
                 progress_bar = st.progress(0)
+                status_text = st.empty()
+                
                 success_count = 0
                 total = len(st.session_state['current_prompts'])
                 activist_name = st.session_state['parsed_data']['name']
                 
                 for idx, p in enumerate(st.session_state['current_prompts']):
-                    # 수정됨: workflow_path 제거, activist_name 추가
+                    cut_num = p['cut']
+                    
+                    # 현재 진행 중인 컷 표시
+                    status_text.markdown(f"⏳ **Cut {cut_num}** 대기열 등록 및 처리 중... (`{idx+1}/{total}`)")
+                    
+                    # 큐(대기열) 등록
                     is_success = queue_comfyui_prompt(
                         comfy_url=comfyui_url,
                         positive_text=p['positive_prompt'],
                         negative_text=p['negative_prompt'],
-                        cut_number=p['cut'],
+                        cut_number=cut_num,
                         activist_name=activist_name,
                         batch_size=5
                     )
-                    if is_success: success_count += 1
+                    
+                    if is_success: 
+                        success_count += 1
+                        
+                    # 진행 바 업데이트
                     progress_bar.progress((idx + 1) / total)
                 
-                if success_count == total: st.success(f"모든 컷 전송 완료 (폴더: output/{activist_name})")
+                # 최종 결과 출력
+                if success_count == total: 
+                    status_text.success(f"✅ 모든 컷 전송 및 처리 완료 (폴더: output/{activist_name})")
+                else:
+                    status_text.error(f"⚠️ 일부 컷 전송 실패 (성공: {success_count}/{total})")
 
 # ==========================================
-# 7단계: 인물별 폴더 기반 이미지 확인 및 선택 (수정본)
+# 7단계: 인물별 폴더 기반 이미지 확인 및 선택
 # ==========================================
 if st.session_state.get('current_prompts'):
     st.write("---")
@@ -337,16 +371,12 @@ if st.session_state.get('current_prompts'):
     activist_name = st.session_state['parsed_data']['name']
     safe_name = activist_name.replace(" ", "_")
     output_dir = os.path.join(comfyui_path, "output", safe_name)
-    final_dir = os.path.join(os.getcwd(), f"final_webtoon_{safe_name}")
     
-    if st.button("인물 전용 폴더에서 이미지 불러오기"):
-        if os.path.exists(output_dir):
-            st.session_state['image_selection_mode'] = True
-        else:
-            st.error(f"폴더를 찾을 수 없습니다: {output_dir}")
-
+    # 🌟 [수정된 부분] NameError 방지를 위해 if문 밖에서 빈 딕셔너리로 미리 선언합니다.
+    selected_images = {}
+    
+    # 사이드바 버튼을 통해 모드가 활성화된 경우에만 아래 내용 출력
     if st.session_state.get('image_selection_mode'):
-        selected_images = {}
         storyboard = st.session_state['current_story_data'].get('storyboard', [])
         
         for p in st.session_state['current_prompts']:
@@ -379,7 +409,7 @@ if st.session_state.get('current_prompts'):
                 
                 # 2. 원본 후보 선택 UI
                 if cut_images:
-                    st.markdown("#### 🖼️ 원본 후보 선택 (재합성용)")
+                    st.markdown("#### 🖼️ 원본 후보 선택")
                     st.info("💡 팁: [🔍 확대] 버튼을 누르면 위아래가 잘리지 않고 스크롤 가능한 큰 창이 열립니다.")
                     
                     cols = st.columns(len(cut_images))
@@ -390,16 +420,16 @@ if st.session_state.get('current_prompts'):
                             img = Image.open(img_path)
                             st.image(img, caption=f"후보 {i+1}", use_container_width=True)
                             
-                            # [수정됨] 확대 버튼과 삭제 버튼을 나란히 배치하기 위한 하위 컬럼 분할
+                            # 확대 버튼과 삭제 버튼을 나란히 배치하기 위한 하위 컬럼 분할
                             btn_cols = st.columns(2)
                             with btn_cols[0]:
                                 if st.button("🔍 확대", key=f"zoom_{cut_num}_{img_file}"):
-                                    show_large_image(img_path) # 최상단에 정의한 팝업 함수 호출
+                                    show_large_image(img_path) 
                             with btn_cols[1]:
                                 if st.button("🗑️ 삭제", key=f"del_{cut_num}_{img_file}"):
                                     try:
                                         os.remove(img_path)
-                                        st.rerun() # 삭제 후 즉시 화면 새로고침
+                                        st.rerun() 
                                     except Exception as e:
                                         st.error(f"삭제 실패: {e}")
                     
@@ -445,10 +475,11 @@ if st.session_state.get('current_prompts'):
                                     activist_name=activist_name
                                 )
                                 if is_success:
-                                    # 합성 성공 시 즉시 새로고침하여 바뀐 이미지를 최상단에 로드
                                     st.rerun() 
                                 else:
                                     st.error("합성 실패. ComfyUI 로그를 확인하세요.")
+    else:
+        st.info("👈 좌측 사이드바에서 [📂 전용 폴더 이미지 불러오기] 버튼을 누르면 이미지가 표시됩니다.")
         # ==========================================
         # 8단계: Canva 연동을 위한 최종 ZIP 추출 (여기에 붙여넣기!)
         # ==========================================
